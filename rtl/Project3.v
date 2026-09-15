@@ -1,24 +1,13 @@
-`timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////////
-// Company: 
-// Engineer: 
-// 
-// Create Date: 04/21/2026 05:56:01 PM
-// Design Name: 
-// Module Name: Project3
-// Project Name: 
-// Target Devices: 
-// Tool Versions: 
-// Description: 
-// 
-// Dependencies: 
-// 
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-// 
-//////////////////////////////////////////////////////////////////////////////////
+// -----------------------------------------------------------------------------
+// File    : Project3.v
+// Brief   : Serial-in/serial-out 4-digit BCD add/subtract unit with framed packets
+// Modules : Project3, packetchecker, sipo_store, BCD_ALU, BCDadd_4d, BCDsub_4d,
+//           BCDadd_1d, RCA, FA, outputmux, piso_out
+// Author  : Bao Zhao
+// Created : 2026-04-21
+// -----------------------------------------------------------------------------
 
+`timescale 1ns / 1ps
 
 module Project3(
     input din,

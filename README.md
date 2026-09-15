@@ -1,133 +1,174 @@
 # Serial BCD Calculator
 
-A stream-in/stream-out 4-digit BCD calculator in Verilog. The design receives a
-framed serial payload, performs decimal addition or subtraction, and transmits a
-framed serial result. The full protocol and datapath are built from scratch — no
-external IP or vendor primitives.
+A stream-in/stream-out 4-digit BCD adder/subtractor in Verilog. The design
+detects a header pattern in a continuous serial bit stream, deserializes an
+operation bit and two 4-digit BCD operands, performs decimal addition or
+subtraction, and serializes a framed 5-digit BCD result. Everything is written
+from scratch; no vendor IP.
 
-Coursework project, NC State University. Simulated and synthesized in Xilinx Vivado.
+Simulated in Xilinx Vivado 2025.2.
 
 ---
 
 ## Interface
 
+Top-level module `Project3`.
+
 | Signal | Dir | Width | Description |
 |---|---|---|---|
-| `clk` | in | 1 | System clock |
-| `rst` | in | 1 | Synchronous reset |
-| `serial_in` | in | 1 | Incoming bit stream |
-| `serial_out` | out | 1 | Outgoing bit stream |
-| `valid_out` | out | 1 | Asserted while a result frame is being transmitted |
+| `din` | in | 1 | Serial input, MSB first, one bit per rising edge |
+| `reset` | in | 1 | Active-high synchronous reset |
+| `clock` | in | 1 | Free-running clock |
+| `result` | out | 1 | Serial output, MSB first; idles low |
 
-<!-- Update this table to match your actual port list. -->
+There is no framing strobe in either direction. Packet boundaries are
+recognized from the data itself.
 
-**Input frame:** an 8-bit start-of-frame byte followed by a 33-bit payload
-(`{op, A[15:0], B[15:0]}`), where `op` selects addition or subtraction and `A`/`B`
-are 4-digit packed BCD operands.
+### Input packet (41 bits)
 
-**Output frame:** a 28-bit framed serial stream carrying the header and the
-4-digit packed BCD result.
+```
+8'h67  op  A[15:0]  B[15:0]
+```
+
+- `8'h67` (`01100111`) is the start-of-packet header.
+- `op` = 0 for `A + B`, 1 for `A − B`.
+- `A` and `B` are 4-digit packed BCD, most significant digit first.
+
+### Output packet (28 bits)
+
+```
+8'hA5  R[19:0]
+```
+
+- `8'hA5` (`10100101`) is the output header.
+- `R` is the 5-digit packed BCD result. The fifth (most significant) digit
+  carries the addition overflow, e.g. 5050 + 5050 = 10100.
+
+Worked example, `3627 + 1287`:
+
+```
+in:   01100111_0_0011_0110_0010_0111_0001_0010_1000_0111
+out:  10100101_0000_0100_1001_0001_0100              (= 04914)
+```
 
 ---
 
 ## Architecture
 
-Five RTL modules:
+Four modules under `Project3`, coordinated by handshake signals rather than a
+central state machine:
 
 | Module | Role |
 |---|---|
-| `sof_detect` | 8-bit sliding comparator detecting the start-of-frame byte |
-| `deserializer` | Captures the 33-bit payload (SIPO) into the operand registers |
-| `bcd_addsub` | 4-digit decimal add/subtract unit |
-| `serializer` | Emits the 28-bit framed result (PISO) |
-| `control_fsm` | Sequences receive → compute → transmit and gates frame detection |
+| `packetchecker` | 8-bit shift window compared against `8'h67`; raises `packet_match` for one cycle. Held off (window cleared) while a payload is being captured. |
+| `sipo_store` | Serial-in/parallel-out capture of the 33-bit payload into `op`, `A`, `B`; asserts `capture_active` during capture and pulses `sipo_done` when complete. |
+| `BCD_ALU` | Combinational 4-digit BCD add and subtract with an output mux selected by `op`. |
+| `piso_out` | Parallel-in/serial-out shifter that loads `{8'hA5, result}` on `sipo_done` and streams 28 bits. |
 
-<!-- docs/block-diagram.png -->
+Data flow: `din` → `packetchecker` → `sipo_store` → `BCD_ALU` → `piso_out` →
+`result`.
+
+### Header detection and non-overlapping capture
+
+`packetchecker` shifts `din` into an 8-bit window on every edge and registers
+`packet_match` high for the cycle after the window becomes `8'h67`. During that
+cycle the first payload bit (`op`) is on `din`, so `sipo_store` sees
+`packet_match`, starts capturing on that edge, and counts 33 bits.
+
+While `sipo_store` is capturing, its `capture_active` output drives the
+checker's `hold_off` input, which clears the window and suppresses matches. This
+makes header detection non-overlapping: a `01100111` bit pattern that happens
+to occur inside `A` or `B`, or straddling the two, cannot be mistaken for a new
+header and restart the capture mid-payload. Once the 33rd bit is in, `hold_off`
+drops, the window starts empty, and the next header is recognized as soon as
+its eight bits have arrived, so packets can be sent back to back with no idle
+gap.
 
 ### Decimal arithmetic
 
-Built bottom-up from gate primitives rather than using the `+` operator:
+Built up structurally:
 
 ```
-full adder → 4-bit ripple-carry adder → BCD digit adder (add-6 correction) → 4-digit carry chain
+FA (dataflow) → 4-bit RCA → BCDadd_1d (digit adder, add-6 correction) → BCDadd_4d (4-digit chain)
 ```
 
-Each digit adder performs a binary add and applies the add-6 correction when the
-result exceeds 9 or produces a carry, keeping every digit in valid BCD range.
+Each `BCDadd_1d` adds two digits in binary with one ripple-carry adder, adds
+`0110` with a second, and selects the corrected sum (and asserts carry-out) when
+the binary sum exceeds 9 or produced a carry. Four of these chain into
+`BCDadd_4d`; the final decimal carry becomes the fifth result digit.
 
-Subtraction reuses the same adder tree via **ten's complement**: each digit of
-the subtrahend is replaced by its 9's complement and the carry-in of the least
-significant digit is asserted. A single adder tree therefore serves both
-operations, with no separate subtractor.
+Subtraction uses ten's complement. `BCDsub_4d` forms the 9's complement of each
+digit of `B` (`9 − digit`), then feeds `A`, the complemented `B`, and a carry-in
+of 1 into its own `BCDadd_4d` instance. The end-around carry is discarded, and
+the 20-bit subtract result has its top digit fixed at 0.
 
----
+The ALU instantiates both the adder and the subtractor and selects between them
+with `outputmux`, so both results are computed in parallel; `op` only picks
+which one is loaded into the output shifter.
 
-## The frame-sync bug
+### Timing
 
-**Symptom.** Certain valid transactions produced corrupted results. The receiver
-would restart capture partway through a payload, discarding operand bits already
-received and re-aligning to the wrong bit boundary.
+- The first output bit appears on `result` two clock cycles after the edge that
+  captures the last payload bit, and the 28-bit output frame finishes 28 cycles
+  later.
+- An input packet is 41 bits and an output packet is 28, so the output of one
+  operation always completes before the next packet's payload is fully
+  captured. The input stream can therefore be fed continuously. `piso_out`
+  latches the ALU result at load time, so later payload bits shifting into
+  `A`/`B` do not disturb an in-flight output.
 
-**Root cause.** The start-of-frame comparator ran continuously against the input
-stream. When payload data happened to contain the 8-bit sync pattern — which is
-possible for many legitimate operand values — the comparator fired mid-transaction
-and reset the deserializer.
+### Limitations
 
-**Fix.** The comparator is now gated by a hold-off signal from the receive FSM.
-Once a frame is detected, frame detection is disabled until the payload is fully
-captured and the transaction completes. Payload bytes that alias the sync pattern
-are treated as data, which is what they are.
-
-This is a general hazard in any serial protocol without byte stuffing or an escape
-mechanism, and it only appears with specific operand values — which is why it
-survived the first round of directed tests.
+- Subtraction assumes `A ≥ B`. If `A < B`, the output is the ten's complement of
+  the true difference (for example, `0 − 1` yields `9999`) with no sign
+  indication. Signed results were out of scope.
+- Invalid BCD digits (`1010`–`1111`) are not detected; inputs are assumed to be
+  valid BCD.
 
 ---
 
 ## Verification
 
-A bit-level testbench drives complete serial transactions at the pin, rather than
-loading internal registers directly, so the frame detection, deserialization,
-arithmetic, and output framing are all exercised end to end.
+A bit-level testbench (`tb/Project3tb.v`) drives complete packets on `din` at
+one bit per 10 ns clock and observes `result` in the Vivado waveform viewer. The
+testbench is not self-checking; correctness was confirmed by reading the output
+frames off the waveform.
 
-Cases covered:
+| Case | Packet | Expected output | Purpose |
+|---|---|---|---|
+| 1 | `5050 + 5050` | `A5` then `0001 0000 0001 0000 0000` (10100) | Decimal carry in two digits and into the fifth digit |
+| 2 | `7777 − 7776` | `A5` then `0000 0000 0000 0000 0001` (00001) | Subtraction; the add-6 correction fires in every digit and the end-around carry is discarded |
 
-- Addition across the operand range
-- Subtraction, including borrow propagation across digits
-- Payloads containing the sync pattern (the regression test for the bug above)
-- Header emission and completion signaling on the output frame
-
-The testbench checks the framed output stream rather than internal state.
-
-<!-- docs/waveform-add.png -->
+The two packets are separated by an idle gap of 42 cycles, so back-to-back
+input and a payload that contains the `8'h67` header pattern are handled by the
+design logic but not yet exercised by this testbench. Both would be the first
+cases to add. The RTL schematic generated by Vivado's RTL Analysis matched the
+hand-drawn block diagram the design was built from.
 
 ---
 
 ## Running it
 
-```
-# Vivado batch simulation
-vivado -mode batch -source sim/run_sim.tcl
-```
-
-<!-- Replace with whatever your actual flow is; if you ran it through the GUI,
-     say so and list the top module name instead. -->
+Simulated through the Vivado 2025.2 GUI: add `rtl/Project3.v` as a design
+source and `tb/Project3tb.v` as a simulation source, set `Project3tb` as the
+simulation top, and run for at least 1.7 µs (the default 1 µs cuts off the
+second packet). There are no scripts.
 
 ---
 
 ## Repository layout
 
 ```
-rtl/     Design sources
-tb/      Testbench
-docs/    Block diagram and waveform captures
-sim/     Simulation scripts
+rtl/Project3.v     Project3, packetchecker, sipo_store, BCD_ALU, BCDadd_4d,
+                   BCDsub_4d, BCDadd_1d, RCA, FA, outputmux, piso_out
+tb/Project3tb.v    Bit-level packet testbench
 ```
 
 ---
 
 ## Notes
 
-Posted publicly with the instructor's permission. If you are currently enrolled
-in this course, submitting this work as your own is an academic integrity
-violation — read it for the ideas, write your own.
+This was Project 3 for ECE 310 (Spring 2026) at NC State University, posted
+publicly with the instructor's permission. If you are currently enrolled in
+this course, submitting this work as your own is an academic integrity
+violation. Read it for the ideas, write your own.

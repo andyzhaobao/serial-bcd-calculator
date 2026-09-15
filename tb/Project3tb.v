@@ -1,24 +1,12 @@
-`timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////////
-// Company: 
-// Engineer: 
-// 
-// Create Date: 04/22/2026 09:08:32 PM
-// Design Name: 
-// Module Name: Project3tb
-// Project Name: 
-// Target Devices: 
-// Tool Versions: 
-// Description: 
-// 
-// Dependencies: 
-// 
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-// 
-//////////////////////////////////////////////////////////////////////////////////
+// -----------------------------------------------------------------------------
+// File    : Project3tb.v
+// Brief   : Testbench for Project3: two 41-bit packets (5050+5050, 7777-7776) on a 10 ns clock
+// Modules : Project3tb
+// Author  : Bao Zhao
+// Created : 2026-04-22
+// -----------------------------------------------------------------------------
 
+`timescale 1ns / 1ps
 
 module Project3tb();
     
